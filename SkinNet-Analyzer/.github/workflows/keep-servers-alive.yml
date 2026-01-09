@@ -1,0 +1,65 @@
+name: Keep Services Alive
+
+on:
+  schedule:
+    - cron: '*/12 * * * *'  # Adjust ping frequency here
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [ml, backend]
+
+    steps:
+      - name: Ping and Alert for ${{ matrix.service }}
+        run: |
+          echo "==> Starting keepalive for ${{ matrix.service }}"
+
+          if [[ "${{ matrix.service }}" == "ml" ]]; then
+            TARGET="${{ secrets.ML_API_URL }}"
+            FAIL_WEBHOOK="${{ secrets.DISCORD_WEBHOOK_ML }}"
+            SUCCESS_WEBHOOK="${{ secrets.DISCORD_WEBHOOK_ML_SUCCESS }}"
+          elif [[ "${{ matrix.service }}" == "backend" ]]; then
+            TARGET="${{ secrets.FRONTEND_BACKEND_API_URL }}/api/status"
+            FAIL_WEBHOOK="${{ secrets.DISCORD_WEBHOOK_BACKEND }}"
+            SUCCESS_WEBHOOK="${{ secrets.DISCORD_WEBHOOK_BACKEND_SUCCESS }}"
+          else
+            echo "❌ Unknown service: ${{ matrix.service }}"
+            exit 1
+          fi
+
+          MAX_ATTEMPTS=3
+          SUCCESS=false
+
+          for ((i=1; i<=MAX_ATTEMPTS; i++)); do
+            echo "Ping attempt $i to $TARGET"
+            if curl -A "GitHubKeepAliveBot/1.0" --fail --silent --show-error -H "X-Heartbeat: true" "$TARGET"; then
+              echo "✅ Ping succeeded on attempt $i"
+              SUCCESS=true
+              break
+            else
+              echo "⚠️ Ping failed at $TARGET, attempt $i"
+              sleep $((i * 10))
+            fi
+          done
+
+          TIMESTAMP="$(date -u)"
+
+          if [[ "$SUCCESS" == "false" ]]; then
+            echo "❌ All ping attempts failed. Sending Discord alert..."
+            curl -H "Content-Type: application/json" \
+              -X POST \
+              -d "$(jq -n --arg service "$TARGET" --arg time "$TIMESTAMP" \
+                  '{content: "⚠️ **Ping failed** for `\($service)` at \($time) UTC. All attempts failed."}')" \
+              "$FAIL_WEBHOOK"
+          else
+            echo "✅ Sending success ping to Discord..."
+            curl -H "Content-Type: application/json" \
+              -X POST \
+              -d "$(jq -n --arg service "$TARGET" --arg time "$TIMESTAMP" \
+                  '{content: "✅ **Ping success** for `\($service)` at \($time) UTC."}')" \
+              "$SUCCESS_WEBHOOK"
+          fi
+
+          echo "==> Finished ${{ matrix.service }}"
